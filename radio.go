@@ -19,15 +19,15 @@ import (
 	"unsafe"
 )
 
-func xfer(file *os.File, txb []byte) ([]byte, error) {
-	len := len(txb)
+func xfer(file *os.File, txb *[]byte) (*[]byte, error) {
+	len := len(*txb)
 	rxb := make([]byte, len)
 	var tr C.SPI_IOC_TRANSFER
-	tr.tx_buf = C.__u64(uintptr(unsafe.Pointer(&txb[0])))
+	tr.tx_buf = C.__u64(uintptr(unsafe.Pointer(&(*txb)[0])))
 	tr.rx_buf = C.__u64(uintptr(unsafe.Pointer(&rxb[0])))
 	tr.len = C.__u32(len)
 	err := ioctl(file, uintptr(C.SPI_IOC_MESSAGE_1), uintptr(unsafe.Pointer(&tr)))
-	return rxb, err
+	return &rxb, err
 }
 
 func ioctl(file *os.File, request, argp uintptr) error {
@@ -35,101 +35,119 @@ func ioctl(file *os.File, request, argp uintptr) error {
 	return os.NewSyscallError("ioctl", errorp)
 }
 
-func setReg(file *os.File, reg, val byte) {
-	txb := []byte{reg, val}
-	xfer(file, txb)
+type Radio struct {
+	file *os.File
 }
 
-func sendStrobe(file *os.File, reg byte) {
+func NewRadio(filename string) *Radio {
+	r := new(Radio)
+	file, err := os.OpenFile(filename, os.O_RDWR, 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	r.file = file
+	return r
+}
+
+func (r *Radio) setReg(reg byte, val byte) {
+	txb := []byte{reg, val}
+	xfer(r.file, &txb)
+}
+
+func (r *Radio) sendStrobe(reg byte) {
 	txb := []byte{reg}
-	xfer(file, txb)
+	xfer(r.file, &txb)
+}
+
+func (r *Radio) setupRX() {
+
+	conf := []byte{
+		0x29, //0x0000 IOCFG2 - GDO2 Output Pin Configuration
+		0x2e, //0x0001 IOCFG1 - GDO1 Output Pin Configuration
+		0x06, //0x0002 IOCFG0 - GDO0 Output Pin Configuration
+		0x47, //0x0003 FIFOTHR - RX FIFO and TX FIFO Thresholds
+		0xd3, //0x0004 SYNC1 - Sync Word, High Byte
+		0x91, //0x0005 SYNC0 - Sync Word, Low Byte
+		0xff, //0x0006 PKTLEN - Packet Length
+		0x04, //0x0007 PKTCTRL1 - Packet Automation Control
+		0x06, //0x0008 PKTCTRL0 - Packet Automation Control
+		0x00, //0x0009 ADDR - Device Address
+		0x00, //0x000a CHANNR - Channel Number
+		0x06, //0x000b FSCTRL1 - Frequency Synthesizer Control
+		0x00, //0x000c FSCTRL0 - Frequency Synthesizer Control
+		0x10, //0x000d FREQ2 - Frequency Control Word, High Byte
+		0xb0, //0x000e FREQ1 - Frequency Control Word, Middle Byte
+		0x71, //0x000f FREQ0 - Frequency Control Word, Low Byte
+		0xc8, //0x0010 MDMCFG4 - Modem Configuration
+		0x93, //0x0011 MDMCFG3 - Modem Configuration
+		0x30, //0x0012 MDMCFG2 - Modem Configuration
+		0x22, //0x0013 MDMCFG1 - Modem Configuration
+		0xf8, //0x0014 MDMCFG0 - Modem Configuration
+		0x24, //0x0015 DEVIATN - Modem Deviation Setting
+		0x07, //0x0016 MCSM2 - Main Radio Control State Machine Configuration
+		0x30, //0x0017 MCSM1 - Main Radio Control State Machine Configuration
+		0x18, //0x0018 MCSM0 - Main Radio Control State Machine Configuration
+		0x16, //0x0019 FOCCFG - Frequency Offset Compensation Configuration
+		0x6c, //0x001a BSCFG - Bit Synchronization Configuration
+		0x43, //0x001b AGCCTRL2 - AGC Control
+		0x40, //0x001c AGCCTRL1 - AGC Control
+		0x91, //0x001d AGCCTRL0 - AGC Control
+		0x87, //0x001e WOREVT1 - High Byte Event0 Timeout
+		0x6b, //0x001f WOREVT0 - Low Byte Event0 Timeout
+		0xfb, //0x0020 WORCTRL - Wake On Radio Control
+		0x56, //0x0021 FREND1 - Front End RX Configuration
+		0x11, //0x0022 FREND0 - Front End TX Configuration
+		0xe9, //0x0023 FSCAL3 - Frequency Synthesizer Calibration
+		0x2a, //0x0024 FSCAL2 - Frequency Synthesizer Calibration
+		0x00, //0x0025 FSCAL1 - Frequency Synthesizer Calibration
+		0x1f, //0x0026 FSCAL0 - Frequency Synthesizer Calibration
+		0x41, //0x0027 RCCTRL1 - RC Oscillator Configuration
+		0x00, //0x0028 RCCTRL0 - RC Oscillator Configuration
+	}
+
+	conf[0x001b] = 0x07 //AGCCTRL2 - AGC Control
+	conf[0x001c] = 0x00 //AGCCTRL1 - AGC Control
+	conf[0x001d] = 0x90 //AGCCTRL0 - AGC Control
+
+	buf := append([]byte{0x40}, conf...)
+
+	fmt.Printf("Conf: % x\n", buf)
+
+	xfer(r.file, &buf)
+
 }
 
 func main() {
 	fmt.Println("Start...")
-	file, err := os.OpenFile("/dev/spidev0.0", os.O_RDWR, 0)
-	if err != nil {
-		log.Fatal(err)
-	}
 
-	sendStrobe(file, 0x30) //Reset
+	radio := NewRadio("/dev/spidev0.0")
+	file := radio.file
 
+	radio.sendStrobe(0x30) //Reset
 
+	radio.setupRX()
+	rxb,_ := xfer(file, &[]byte{0x7e, 0, 0xc0, 0, 0, 0, 0, 0, 0})
 
-
-//
-// Rf settings for CC1101
-//
-setReg(file, 0x0000, 0x29) //IOCFG2 - GDO2 Output Pin Configuration
-setReg(file, 0x0001, 0x2e) //IOCFG1 - GDO1 Output Pin Configuration
-setReg(file, 0x0002, 0x06) //IOCFG0 - GDO0 Output Pin Configuration
-setReg(file, 0x0003, 0x47) //FIFOTHR - RX FIFO and TX FIFO Thresholds
-setReg(file, 0x0004, 0xd3) //SYNC1 - Sync Word, High Byte
-setReg(file, 0x0005, 0x91) //SYNC0 - Sync Word, Low Byte
-setReg(file, 0x0006, 0xff) //PKTLEN - Packet Length
-setReg(file, 0x0007, 0x04) //PKTCTRL1 - Packet Automation Control
-setReg(file, 0x0008, 0x06) //PKTCTRL0 - Packet Automation Control
-setReg(file, 0x0009, 0x00) //ADDR - Device Address
-setReg(file, 0x000a, 0x00) //CHANNR - Channel Number
-setReg(file, 0x000b, 0x06) //FSCTRL1 - Frequency Synthesizer Control
-setReg(file, 0x000c, 0x00) //FSCTRL0 - Frequency Synthesizer Control
-setReg(file, 0x000d, 0x10) //FREQ2 - Frequency Control Word, High Byte
-setReg(file, 0x000e, 0xb0) //FREQ1 - Frequency Control Word, Middle Byte
-setReg(file, 0x000f, 0x71) //FREQ0 - Frequency Control Word, Low Byte
-setReg(file, 0x0010, 0xc8) //MDMCFG4 - Modem Configuration
-setReg(file, 0x0011, 0x93) //MDMCFG3 - Modem Configuration
-setReg(file, 0x0012, 0x30) //MDMCFG2 - Modem Configuration
-setReg(file, 0x0013, 0x22) //MDMCFG1 - Modem Configuration
-setReg(file, 0x0014, 0xf8) //MDMCFG0 - Modem Configuration
-setReg(file, 0x0015, 0x24) //DEVIATN - Modem Deviation Setting
-setReg(file, 0x0016, 0x07) //MCSM2 - Main Radio Control State Machine Configuration
-setReg(file, 0x0017, 0x30) //MCSM1 - Main Radio Control State Machine Configuration
-setReg(file, 0x0018, 0x18) //MCSM0 - Main Radio Control State Machine Configuration
-setReg(file, 0x0019, 0x16) //FOCCFG - Frequency Offset Compensation Configuration
-setReg(file, 0x001a, 0x6c) //BSCFG - Bit Synchronization Configuration
-setReg(file, 0x001b, 0x43) //AGCCTRL2 - AGC Control
-setReg(file, 0x001c, 0x40) //AGCCTRL1 - AGC Control
-setReg(file, 0x001d, 0x91) //AGCCTRL0 - AGC Control
-setReg(file, 0x001e, 0x87) //WOREVT1 - High Byte Event0 Timeout
-setReg(file, 0x001f, 0x6b) //WOREVT0 - Low Byte Event0 Timeout
-setReg(file, 0x0020, 0xfb) //WORCTRL - Wake On Radio Control
-setReg(file, 0x0021, 0x56) //FREND1 - Front End RX Configuration
-setReg(file, 0x0022, 0x11) //FREND0 - Front End TX Configuration
-setReg(file, 0x0023, 0xe9) //FSCAL3 - Frequency Synthesizer Calibration
-setReg(file, 0x0024, 0x2a) //FSCAL2 - Frequency Synthesizer Calibration
-setReg(file, 0x0025, 0x00) //FSCAL1 - Frequency Synthesizer Calibration
-setReg(file, 0x0026, 0x1f) //FSCAL0 - Frequency Synthesizer Calibration
-setReg(file, 0x0027, 0x41) //RCCTRL1 - RC Oscillator Configuration
-setReg(file, 0x0028, 0x00) //RCCTRL0 - RC Oscillator Configuration
-
-
-
-
-	setReg(file, 0x001b, 0x07) //AGCCTRL2 - AGC Control
-	setReg(file, 0x001c, 0x00) //AGCCTRL1 - AGC Control
-	setReg(file, 0x001d, 0x90) //AGCCTRL0 - AGC Control
-
-	xfer(file, []byte{0x7e, 0, 0xc0, 0, 0, 0, 0, 0, 0})
-
-	sendStrobe(file, 0x34) //RX-Mode
+	fmt.Printf("OutBytes: % x\n", *rxb)
+	radio.sendStrobe(0x34) //RX-Mode
 
 	var counter rlCounter
 	rawChan := make(chan rune, 100)
 	go processRaw(rawChan)
 
 	for {
-		rxb, _ := xfer(file, []byte{0xc0})
-		if rxb[0] == 31 {
-			rxb, _ := xfer(file, []byte{0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
-				//fmt.Printf("OutBytes: % x\n", rxb)
-			a := rxb[1:]
+		rxb, _ := xfer(file, &[]byte{0x3d})
+		if (*rxb)[0] == 31 {
+			rxb, _ := xfer(file, &[]byte{0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
+			//fmt.Printf("OutBytes: % x\n", *rxb)
+			a := (*rxb)[1:]
 			for i := range a {
 				for b := 0; b < 8; b++ {
 					counter.count((a[i]>>uint(7-b))&1, rawChan)
 				}
 			}
 		} else {
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(1 * time.Millisecond)
 		}
 	}
 
@@ -184,4 +202,3 @@ func processRaw(ch chan rune) {
 	}
 
 }
-
