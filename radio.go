@@ -36,7 +36,8 @@ func ioctl(file *os.File, request, argp uintptr) error {
 }
 
 type Radio struct {
-	file *os.File
+	file         *os.File
+	rxBitCounter rlCounter
 }
 
 func NewRadio(filename string) *Radio {
@@ -46,6 +47,13 @@ func NewRadio(filename string) *Radio {
 		log.Fatal(err)
 	}
 	r.file = file
+
+	symbolChannel := make(chan runLength, 100)
+	r.rxBitCounter.channel = symbolChannel
+	go r.processSymbols(symbolChannel)
+
+	go r.mainLoop()
+
 	return r
 }
 
@@ -115,90 +123,93 @@ func (r *Radio) setupRX() {
 
 	xfer(r.file, &buf)
 
+	xfer(r.file, &[]byte{0x7e, 0, 0xc0, 0, 0, 0, 0, 0, 0}) //init PA table
+
 }
 
-func main() {
-	fmt.Println("Start...")
+func (r *Radio) processSymbols(symbolChannel chan runLength) {
+	var symbols bytes.Buffer
+	for {
+		rl := <-symbolChannel
+        l:=rl.length
+        if(l>255) {l=255}
+		if rl.value == 0 && l > 90 {
+			if len:=symbols.Len();len<200&&len>10 {fmt.Printf("Buf: %d \n", symbols.Bytes())}
+			symbols.Reset()
+		} else {
+			if symbols.Len()<1000 {symbols.WriteByte(byte(l))}
+		}
 
-	radio := NewRadio("/dev/spidev0.0")
-	file := radio.file
+	}
 
-	radio.sendStrobe(0x30) //Reset
+}
 
-	radio.setupRX()
-	rxb,_ := xfer(file, &[]byte{0x7e, 0, 0xc0, 0, 0, 0, 0, 0, 0})
-
-	fmt.Printf("OutBytes: % x\n", *rxb)
-	radio.sendStrobe(0x34) //RX-Mode
-
-	var counter rlCounter
-	rawChan := make(chan rune, 100)
-	go processRaw(rawChan)
+func (r *Radio) mainLoop() {
+	r.sendStrobe(0x30) //Reset
 
 	for {
-		rxb, _ := xfer(file, &[]byte{0x3d})
-		if (*rxb)[0] == 31 {
-			rxb, _ := xfer(file, &[]byte{0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
-			//fmt.Printf("OutBytes: % x\n", *rxb)
-			a := (*rxb)[1:]
-			for i := range a {
-				for b := 0; b < 8; b++ {
-					counter.count((a[i]>>uint(7-b))&1, rawChan)
+		rxb, _ := xfer(r.file, &[]byte{0x3d})
+		status := (*rxb)[0] & 0xf0
+
+		if status == 0x10 {
+			rxb, _ := xfer(r.file, &[]byte{0xfb, 0x00})
+			byteCount := (*rxb)[1]
+
+			if byteCount > 16 {
+
+				rxb, _ := xfer(r.file, &[]byte{0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
+				//fmt.Printf("OutBytes: % x\n", *rxb)
+				a := (*rxb)[1:]
+				for i := range a {
+					for b := 0; b < 8; b++ {
+						r.rxBitCounter.count((a[i] >> uint(7-b)) & 1)
+					}
 				}
+
+			} else {
+				time.Sleep(1 * time.Millisecond)
 			}
+		} else if status == 0x60 { //RX overflow
+			r.sendStrobe(0x3a) //RX-Mode
+		} else if status == 0x00 { //idle
+			r.setupRX()
+			r.sendStrobe(0x34) //RX-Mode
 		} else {
 			time.Sleep(1 * time.Millisecond)
 		}
+
 	}
 
+}
+
+type runLength struct {
+	value  byte
+	length uint
 }
 
 type rlCounter struct {
 	current byte
 	counter uint
+	channel chan runLength
 }
 
-func (this *rlCounter) count(val byte, ch chan rune) {
-	if val == this.current {
-		this.counter++
+func (c *rlCounter) count(val byte) {
+	if val == c.current {
+		c.counter++
 	} else {
-		//fmt.Printf("%b %d\n", this.current, this.counter)
-		switch {
-		case this.counter >= 2 && this.counter <= 6:
-			ch <- '1'
-		case this.counter >= 9 && this.counter <= 13:
-			ch <- '3'
-		case this.counter > 50 && this.current == 0:
-			ch <- 'S'
-		default:
-			ch <- 'X'
-		}
-		this.current = val
-		this.counter = 1
+		c.channel <- runLength{value: c.current, length: c.counter}
+
+		c.current = val
+		c.counter = 1
 	}
 }
 
-func processRaw(ch chan rune) {
-	var symbols bytes.Buffer
-	ok := false
+func main() {
+	fmt.Println("Start...")
+
+	NewRadio("/dev/spidev0.0")
 	for {
-		c := <-ch
-		switch c {
-		case '1', '3':
-			if ok {
-				symbols.WriteByte(byte(c))
-			}
-		case 'X':
-			ok = false
-			symbols.Reset()
-		case 'S':
-			fmt.Println(symbols.String())
-
-			symbols.Reset()
-			ok = true
-		}
-		//fmt.Printf("#%s\n", c)
-
+		time.Sleep(1 * time.Millisecond)
 	}
 
 }
