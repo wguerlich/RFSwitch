@@ -129,15 +129,35 @@ func (r *Radio) setupRX() {
 
 func (r *Radio) processSymbols(symbolChannel chan runLength) {
 	var symbols bytes.Buffer
+	var minLen uint
+	var total uint
+
+	reset := func() {
+		symbols.Reset()
+		minLen = 0
+		total = 0
+	}
+
+	reset()
 	for {
 		rl := <-symbolChannel
-        l:=rl.length
-        if(l>255) {l=255}
-		if rl.value == 0 && l > 90 {
-			if len:=symbols.Len();len<200&&len>10 {fmt.Printf("Buf: %d \n", symbols.Bytes())}
-			symbols.Reset()
+		l := rl.length
+		if l > 255 {
+			l = 255
+		}
+		if rl.value == 0 && l > 50 {
+			if len := symbols.Len(); len <= 1024 && len > 10 && minLen > 1 {
+				fmt.Printf("Buf: (%d) %d \n", total, symbols.Bytes())
+			}
+			reset()
 		} else {
-			if symbols.Len()<1000 {symbols.WriteByte(byte(l))}
+			if symbols.Len() < 1024 {
+				symbols.WriteByte(byte(l))
+			}
+			if minLen == 0 || l < minLen {
+				minLen = l
+			}
+			total += l
 		}
 
 	}
@@ -152,10 +172,9 @@ func (r *Radio) mainLoop() {
 		status := (*rxb)[0] & 0xf0
 
 		if status == 0x10 {
-			rxb, _ := xfer(r.file, &[]byte{0xfb, 0x00})
-			byteCount := (*rxb)[1]
+			rxb, _ := xfer(r.file, &[]byte{0xfb, 0x00, 0xfb, 0x00})
 
-			if byteCount > 16 {
+			if byteCount := (*rxb)[1]; byteCount == (*rxb)[3] && byteCount > 16 {
 
 				rxb, _ := xfer(r.file, &[]byte{0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
 				//fmt.Printf("OutBytes: % x\n", *rxb)
