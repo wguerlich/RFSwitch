@@ -38,6 +38,7 @@ func ioctl(file *os.File, request, argp uintptr) error {
 type Radio struct {
 	file         *os.File
 	rxBitCounter rlCounter
+    RcvChan chan []uint
 }
 
 func NewRadio(filename string) *Radio {
@@ -47,6 +48,7 @@ func NewRadio(filename string) *Radio {
 		log.Fatal(err)
 	}
 	r.file = file
+    r.RcvChan=make(chan []uint,100)
 
 	symbolChannel := make(chan runLength, 100)
 	r.rxBitCounter.channel = symbolChannel
@@ -147,7 +149,14 @@ func (r *Radio) processSymbols(symbolChannel chan runLength) {
 		}
 		if rl.value == 0 && l > 50 {
 			if len := symbols.Len(); len <= 1024 && len > 10 && minLen > 1 {
-				fmt.Printf("Buf: (%d) %d \n", total, symbols.Bytes())
+                payloadBytes:=symbols.Bytes()
+                len:= symbols.Len()
+                payload :=make([]uint, len,len)
+                for i:=range payloadBytes {
+                   payload[i]=uint(payloadBytes[i])
+                }
+				//fmt.Printf("Buf: (%d) %d \n", total,msg)
+                r.RcvChan<-payload
 			}
 			reset()
 		} else {
@@ -223,6 +232,8 @@ func (c *rlCounter) count(val byte) {
 	}
 }
 
+
+/*
 func main() {
 	fmt.Println("Start...")
 
@@ -232,3 +243,4 @@ func main() {
 	}
 
 }
+*/
