@@ -39,6 +39,17 @@ type Radio struct {
 	file         *os.File
 	rxBitCounter rlCounter
 	RcvChan      chan *RcvMsg
+	SndChan      chan *SndMsg
+}
+
+type SndPayload []uint
+
+type SndMsg struct {
+	Freq       float64
+	Repeat     int
+	Pause      int
+	Pulsewidth int
+	Payload    SndPayload
 }
 
 type RcvPayload []uint
@@ -55,6 +66,7 @@ func NewRadio(filename string) *Radio {
 	}
 	r.file = file
 	r.RcvChan = make(chan *RcvMsg, 100)
+	r.SndChan = make(chan *SndMsg, 100)
 
 	symbolChannel := make(chan runLength, 100)
 	r.rxBitCounter.channel = symbolChannel
@@ -135,6 +147,63 @@ func (r *Radio) setupRX() {
 
 }
 
+func (r *Radio) setupTX(msg *SndMsg, pktlen byte) {
+
+	conf := []byte{
+		0x29,   //0x0000 IOCFG2 - GDO2 Output Pin Configuration
+		0x2e,   //0x0001 IOCFG1 - GDO1 Output Pin Configuration
+		0x06,   //0x0002 IOCFG0 - GDO0 Output Pin Configuration
+		0x47,   //0x0003 FIFOTHR - RX FIFO and TX FIFO Thresholds
+		0x00,   //0x0004 SYNC1 - Sync Word, High Byte
+		0x00,   //0x0005 SYNC0 - Sync Word, Low Byte
+		pktlen, //0x0006 PKTLEN - Packet Length
+		0x00,   //0x0007 PKTCTRL1 - Packet Automation Control
+		0x01,   //0x0008 PKTCTRL0 - Packet Automation Control
+		0x00,   //0x0009 ADDR - Device Address
+		0x00,   //0x000a CHANNR - Channel Number
+		0x06,   //0x000b FSCTRL1 - Frequency Synthesizer Control
+		0x00,   //0x000c FSCTRL0 - Frequency Synthesizer Control
+		0x10,   //0x000d FREQ2 - Frequency Control Word, High Byte
+		0xb0,   //0x000e FREQ1 - Frequency Control Word, Middle Byte
+		0x71,   //0x000f FREQ0 - Frequency Control Word, Low Byte
+		0xc6,   //0x0010 MDMCFG4 - Modem Configuration
+		0xc0,   //0x0011 MDMCFG3 - Modem Configuration
+		0x30,   //0x0012 MDMCFG2 - Modem Configuration
+		0x00,   //0x0013 MDMCFG1 - Modem Configuration
+		0xf8,   //0x0014 MDMCFG0 - Modem Configuration
+		0x24,   //0x0015 DEVIATN - Modem Deviation Setting
+		0x07,   //0x0016 MCSM2 - Main Radio Control State Machine Configuration
+		0x03,   //0x0017 MCSM1 - Main Radio Control State Machine Configuration
+		0x18,   //0x0018 MCSM0 - Main Radio Control State Machine Configuration
+		0x16,   //0x0019 FOCCFG - Frequency Offset Compensation Configuration
+		0x6c,   //0x001a BSCFG - Bit Synchronization Configuration
+		0x43,   //0x001b AGCCTRL2 - AGC Control
+		0x40,   //0x001c AGCCTRL1 - AGC Control
+		0x91,   //0x001d AGCCTRL0 - AGC Control
+		0x87,   //0x001e WOREVT1 - High Byte Event0 Timeout
+		0x6b,   //0x001f WOREVT0 - Low Byte Event0 Timeout
+		0xfb,   //0x0020 WORCTRL - Wake On Radio Control
+		0x56,   //0x0021 FREND1 - Front End RX Configuration
+		0x11,   //0x0022 FREND0 - Front End TX Configuration
+		0xe9,   //0x0023 FSCAL3 - Frequency Synthesizer Calibration
+		0x2a,   //0x0024 FSCAL2 - Frequency Synthesizer Calibration
+		0x00,   //0x0025 FSCAL1 - Frequency Synthesizer Calibration
+		0x1f,   //0x0026 FSCAL0 - Frequency Synthesizer Calibration
+		0x41,   //0x0027 RCCTRL1 - RC Oscillator Configuration
+		0x00,   //0x0028 RCCTRL0 - RC Oscillator Configuration
+
+	}
+
+	buf := append([]byte{0x40}, conf...)
+
+	fmt.Printf("Conf: % x\n", buf)
+
+	xfer(r.file, &buf)
+
+	xfer(r.file, &[]byte{0x7e, 0, 0xc0, 0, 0, 0, 0, 0, 0}) //init PA table
+
+}
+
 func (r *Radio) processSymbols(symbolChannel chan runLength) {
 	var symbols bytes.Buffer
 	var minLen uint
@@ -203,7 +272,14 @@ func (r *Radio) mainLoop() {
 				}
 
 			} else {
-				time.Sleep(1 * time.Millisecond)
+
+				select {
+				case sndPayload := <-r.SndChan:
+					r.send(sndPayload)
+				case <-time.After(1 * time.Millisecond):
+
+				}
+
 			}
 		} else if status == 0x60 { //RX overflow
 			r.sendStrobe(0x3a) //RX-Mode
@@ -215,6 +291,49 @@ func (r *Radio) mainLoop() {
 		}
 
 	}
+
+}
+
+func (r *Radio) send(msg *SndMsg) {
+	var buf []byte
+
+	b := 0
+	var cur *byte
+
+	for n, v := range msg.Payload {
+		for i := uint(0); i < v; i++ {
+			if b == 0 {
+				buf = append(buf, 0)
+				cur = &buf[len(buf)-1]
+			}
+			if n&1 == 0 {
+				*cur |= 1 << uint(7-b)
+			}
+			if b < 7 {
+				b++
+			} else {
+				b = 0
+			}
+		}
+	}
+	fmt.Printf("JSON: %s \n", msg)
+	fmt.Printf("BUF: % x \n", buf)
+	r.sendStrobe(0x36) //sidle
+	time.Sleep(1 * time.Millisecond)
+	r.sendStrobe(0x3b) //SFTX
+	time.Sleep(1 * time.Millisecond)
+	r.setupTX(msg, byte(len(buf)))
+
+	//put in TX buffer
+	buf = append([]byte{0x7f}, buf...)
+
+	for i := 0; i < 20; i++ {
+		xfer(r.file, &buf)
+
+		r.sendStrobe(0x35) //TX-mode
+		time.Sleep(50 * time.Millisecond)
+	}
+	r.sendStrobe(0x36) //sidle
 
 }
 
@@ -239,15 +358,3 @@ func (c *rlCounter) count(val byte) {
 		c.counter = 1
 	}
 }
-
-/*
-func main() {
-	fmt.Println("Start...")
-
-	NewRadio("/dev/spidev0.0")
-	for {
-		time.Sleep(1 * time.Millisecond)
-	}
-
-}
-*/
