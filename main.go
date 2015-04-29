@@ -30,16 +30,19 @@ func main() {
 			buf = bytes.NewBufferString("{}")
 		}
 
-		resp, _ := http.Post(*url, "application/json", buf)
+		resp, err := http.Post(*url, "application/json", buf)
 
-		respBuf := new(bytes.Buffer)
-		respBuf.ReadFrom(resp.Body)
+		if err == nil {
 
-		sndPayload := new(SndMsg)
+			respBuf := new(bytes.Buffer)
+			respBuf.ReadFrom(resp.Body)
 
-		json.Unmarshal(respBuf.Bytes(), sndPayload)
-		if sndPayload.Repeat > 0 {
-			r.SndChan <- sndPayload
+			sndPayload := new(SndMsg)
+
+			json.Unmarshal(respBuf.Bytes(), sndPayload)
+			if sndPayload.Repeat > 0 {
+				r.SndChan <- sndPayload
+			}
 		}
 
 	}
