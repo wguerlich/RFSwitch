@@ -106,7 +106,7 @@ func (r *Radio) setupRX() {
 		0x10, //0x000d FREQ2 - Frequency Control Word, High Byte
 		0xb0, //0x000e FREQ1 - Frequency Control Word, Middle Byte
 		0x71, //0x000f FREQ0 - Frequency Control Word, Low Byte
-		0xc8, //0x0010 MDMCFG4 - Modem Configuration
+		0x88, //0x0010 MDMCFG4 - Modem Configuration
 		0x93, //0x0011 MDMCFG3 - Modem Configuration
 		0x30, //0x0012 MDMCFG2 - Modem Configuration
 		0x22, //0x0013 MDMCFG1 - Modem Configuration
@@ -331,7 +331,7 @@ func (r *Radio) send(msg *SndMsg) {
 		xfer(r.file, &buf)
 
 		r.sendStrobe(0x35) //TX-mode
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(12 * time.Millisecond)
 	}
 	r.sendStrobe(0x36) //sidle
 
